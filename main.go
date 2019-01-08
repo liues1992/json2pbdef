@@ -157,7 +157,7 @@ func messageFromJsonObject(name string, obj map[string]interface{}, indent int) 
 		}
 		var typ string
 		var outputObject map[string]interface{}
-		typ, isMap, outputObject, err = getType(v, k, true)
+		typ, isMap, outputObject, err = getType(v, strcase.ToCamel(k), true)
 		if err != nil {
 			return
 		}
