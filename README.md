@@ -20,3 +20,7 @@ json2pbdef http://jsonapi.com/some_json_response
 cat text.json | json2pbdef
 
 ```
+
+# TODO
+- List rules that the json data must obey
+- Add more tests
