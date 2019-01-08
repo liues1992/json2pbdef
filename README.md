@@ -20,3 +20,6 @@ json2protodef http://jsonapi.com/some_json_response
 cat text.json | json2protodef
 
 ```
+
+# TODO
+- Custom message name.

@@ -1,11 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/bitly/go-simplejson"
+	"github.com/iancoleman/strcase"
+	"github.com/pkg/errors"
 	"github.com/urfave/cli"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
 )
 
 func main() {
@@ -33,22 +42,77 @@ VERSION:
 	app.Name = "json2protodef"
 	app.Usage = "Create protobuf definition from json data"
 	app.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name:  "name",
+			Usage: "custom message name",
+		},
+		cli.StringFlag{
+			Name:  "package",
+			Usage: "add package name",
+		},
 		cli.BoolFlag{
-			Name:  "flat",
-			Usage: "generate flat message definition instead of nested messages",
+			Name:  "header",
+			Usage: "with file header",
 		},
 	}
-	app.Action = func(c *cli.Context) error {
-		fmt.Println("boom! I say!", c.NArg())
+	app.Action = func(c *cli.Context) (err error) {
+		var hasStdIn = false
 		if c.NArg() == 0 {
-			return cli.ShowAppHelp(c)
+			stat, _ := os.Stdin.Stat()
+			if stat.Size() == 0 {
+				return cli.ShowAppHelp(c)
+			}
+			hasStdIn = true
 		}
-		data := []byte(c.Get(0))
-		j, err := simplejson.NewJson()
+		var data []byte
+		if hasStdIn {
+			data, err = ioutil.ReadAll(os.Stdin)
+			if err != nil {
+				return
+			}
+		} else {
+			arg0 := c.Args().Get(0)
+			data = []byte(arg0)
+			if data[0] != '{' {
+				// not json data
+				if len(arg0) >= 7 && (arg0[:5] == "http:" || arg0[:6] == "https:") {
+					data, err = getHttpContent(arg0)
+					if err != nil {
+						return
+					}
+				} else {
+					data, err = ioutil.ReadFile(arg0)
+					if err != nil {
+						return
+					}
+				}
+			}
+
+		}
+		j, err := simplejson.NewJson(data)
 		if err != nil {
 			return err
 		}
-		m := j.MustMap()
+		m, err := j.Map()
+		if err != nil {
+			return err
+		}
+
+		var customName = c.String("name")
+		if customName == "" {
+			customName = "Message"
+		}
+		output, err := messageFromJsonObject(customName, m, 0)
+		if err != nil {
+			return
+		}
+		if c.Bool("header") {
+			fmt.Println("syntax = \"proto3\";\n")
+		}
+		if p := c.String("package"); p != "" {
+			fmt.Println("package " + p + ";\n")
+		}
+		fmt.Println(strings.Join(output, "\n"))
 		return nil
 	}
 
@@ -56,4 +120,137 @@ VERSION:
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// @param name message name
+// @param m a map from json
+// @return protobuf message definition
+//		   code in string slice
+func messageFromJsonObject(name string, obj map[string]interface{}, indent int) (ret []string, err error) {
+	name = strcase.ToCamel(name)
+	if len(obj) == 0 {
+		err = errors.New("Cannot infer structure from empty object")
+		return
+	}
+	i := 1
+	ret = append(ret, strings.Repeat(" ", indent)+"message "+name+" {")
+	//sort the keys to get consistent output
+	var keys []string
+	for k, _ := range obj {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := obj[k]
+		var isRepeated = false
+		var isMap = false
+		switch reflect.TypeOf(v).Kind() {
+		case reflect.Slice:
+			s := reflect.ValueOf(v)
+			if s.Len() == 0 {
+				err = errors.New("Connot infer a empty array")
+				return
+			}
+			isRepeated = true
+			v = s.Index(0).Interface()
+		}
+		var typ string
+		var outputObject map[string]interface{}
+		typ, isMap, outputObject, err = getType(v, k, true)
+		if err != nil {
+			return
+		}
+		if outputObject != nil {
+			var lines []string
+			lines, err = messageFromJsonObject(k, outputObject, indent+4)
+			if err != nil {
+				return
+			}
+			ret = append(ret, lines...)
+		}
+		var field string
+		if isMap {
+			field = fmt.Sprintf("map<int64, %s> %s = %d;", typ, k, i)
+		} else if isRepeated {
+			field = fmt.Sprintf("repeated %s %s = %d;", typ, k, i)
+		} else {
+			field = fmt.Sprintf("%s %s = %d;", typ, k, i)
+		}
+		i += 1
+		ret = append(ret, strings.Repeat(" ", indent+4)+field)
+	}
+	ret = append(ret, strings.Repeat(" ", indent)+"}")
+	return
+}
+
+func getType(v interface{}, name string, allowMap bool) (typ string, isMap bool, outputObject map[string]interface{}, err error) {
+	switch v.(type) {
+	case json.Number:
+		num := v.(json.Number)
+		_, e := num.Int64()
+		if e == nil {
+			typ = "int64"
+		} else {
+			typ = "float64"
+		}
+	case string:
+		typ = "string"
+	case bool:
+		typ = "bool"
+	case map[string]interface{}:
+		// this obj may be "map"
+		// which means variable keys map to same value structure
+		// key must be number
+		// eg.
+		// {
+		//    "1": "a",
+		//    "2": "b"
+		// }
+		item := v.(map[string]interface{})
+		if len(item) == 0 {
+			err = errors.New("Cannot infer a empty map")
+			return
+		}
+		var firstVal interface{}
+		for k1, v1 := range item {
+			firstVal = v1
+			_, e := strconv.ParseInt(k1, 10, 64)
+			if e == nil {
+				isMap = true
+			}
+			break
+		}
+		if !allowMap && isMap {
+			err = errors.New("Nested map is not allowed")
+			return
+		}
+		if isMap {
+			typ, _, outputObject, err = getType(firstVal, name, false)
+			if err != nil {
+				return
+			}
+		} else {
+			outputObject = item
+			typ = name
+			return
+		}
+	default:
+		err = errors.New(fmt.Sprintf("unknow type %T", v))
+	}
+	return
+}
+
+func getHttpContent(url string) (ret []byte, err error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+	ret = body
+	return
 }
