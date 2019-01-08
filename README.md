@@ -1,10 +1,10 @@
-# json2protodef
+# json2pbdef
 create protobuf definition from json data
 
 # Usage
 
 ```
-json2protodef '{"msg":"hello"}'
+json2pbdef '{"msg":"hello"}'
 
 # output
 message Message {
@@ -13,13 +13,10 @@ message Message {
 ```
 
 ```
-json2protodef input.txt
+json2pbdef input.txt
 
-json2protodef http://jsonapi.com/some_json_response
+json2pbdef http://jsonapi.com/some_json_response
 
-cat text.json | json2protodef
+cat text.json | json2pbdef
 
 ```
-
-# TODO
-- Custom message name.
