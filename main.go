@@ -143,6 +143,10 @@ func messageFromJsonObject(name string, obj map[string]interface{}, indent int) 
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := obj[k]
+		if v == nil {
+			err = errors.New("Cannot infer structure from null value")
+			return
+		}
 		var isRepeated = false
 		var isMap = false
 		switch reflect.TypeOf(v).Kind() {
