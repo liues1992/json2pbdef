@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,18 +92,18 @@ VERSION:
 		}
 		j, err := simplejson.NewJson(data)
 		if err != nil {
-			return err
+			return errors.WithMessage(err, "Invalid json")
 		}
 		m, err := j.Map()
 		if err != nil {
-			return err
+			return errors.WithMessage(err, "json root must be a object")
 		}
 
 		var customName = c.String("name")
 		if customName == "" {
 			customName = "Message"
 		}
-		output, err := messageFromJsonObject(customName, m, 0)
+		output, err := messageFromJsonObject(customName, m, 0, []string{})
 		if err != nil {
 			return
 		}
@@ -122,14 +123,28 @@ VERSION:
 	}
 }
 
+func isValidFieldName(name string) bool {
+	var a = "^[a-zA-Z_][a-zA-Z_0-9]*$"
+	var r, _ = regexp.Compile(a)
+	return r.Match([]byte(name))
+}
+
+func getKeyPath(keyPaths []string, key string) string {
+	r := ""
+	for _, v := range keyPaths {
+		r = r + "." + v
+	}
+	return r + "." + key
+}
+
 // @param name message name
 // @param m a map from json
 // @return protobuf message definition
 //		   code in string slice
-func messageFromJsonObject(name string, obj map[string]interface{}, indent int) (ret []string, err error) {
+func messageFromJsonObject(name string, obj map[string]interface{}, indent int, keyPaths []string) (ret []string, err error) {
 	name = strcase.ToCamel(name)
 	if len(obj) == 0 {
-		err = errors.New("Cannot infer structure from empty object")
+		err = errors.New("Cannot infer structure from empty object, keypath=" + getKeyPath(keyPaths, ""))
 		return
 	}
 	i := 1
@@ -142,9 +157,13 @@ func messageFromJsonObject(name string, obj map[string]interface{}, indent int) 
 
 	sort.Strings(keys)
 	for _, k := range keys {
+		if !isValidFieldName(k) {
+			err = errors.New("Invalid field name: \"" + getKeyPath(keyPaths, k) + "\"")
+			return
+		}
 		v := obj[k]
 		if v == nil {
-			err = errors.New("Cannot infer structure from null value")
+			err = errors.New("Cannot infer structure from null value, keypath=" + getKeyPath(keyPaths, k))
 			return
 		}
 		var isRepeated = false
@@ -153,7 +172,7 @@ func messageFromJsonObject(name string, obj map[string]interface{}, indent int) 
 		case reflect.Slice:
 			s := reflect.ValueOf(v)
 			if s.Len() == 0 {
-				err = errors.New("Connot infer a empty array")
+				err = errors.New("Connot infer a empty array, keypath=" + getKeyPath(keyPaths, k))
 				return
 			}
 			isRepeated = true
@@ -161,13 +180,18 @@ func messageFromJsonObject(name string, obj map[string]interface{}, indent int) 
 		}
 		var typ string
 		var outputObject map[string]interface{}
-		typ, isMap, outputObject, err = getType(v, strcase.ToCamel(k), true)
+		typ, isMap, outputObject, err = getType(v, strcase.ToCamel(k), true, getKeyPath(keyPaths, k))
 		if err != nil {
 			return
 		}
 		if outputObject != nil {
 			var lines []string
-			lines, err = messageFromJsonObject(k, outputObject, indent+4)
+			var subKeyPaths = keyPaths
+			subKeyPaths = append(subKeyPaths, k)
+			if isRepeated {
+				subKeyPaths = append(subKeyPaths, "0")
+			}
+			lines, err = messageFromJsonObject(k, outputObject, indent+4, subKeyPaths)
 			if err != nil {
 				return
 			}
@@ -188,7 +212,7 @@ func messageFromJsonObject(name string, obj map[string]interface{}, indent int) 
 	return
 }
 
-func getType(v interface{}, name string, allowMap bool) (typ string, isMap bool, outputObject map[string]interface{}, err error) {
+func getType(v interface{}, name string, allowMap bool, keyPath string) (typ string, isMap bool, outputObject map[string]interface{}, err error) {
 	switch v.(type) {
 	case json.Number:
 		num := v.(json.Number)
@@ -213,12 +237,14 @@ func getType(v interface{}, name string, allowMap bool) (typ string, isMap bool,
 		// }
 		item := v.(map[string]interface{})
 		if len(item) == 0 {
-			err = errors.New("Cannot infer a empty map")
+			err = errors.New("Cannot infer a empty map, keypath=" + keyPath)
 			return
 		}
 		var firstVal interface{}
+		var firstKey string
 		for k1, v1 := range item {
 			firstVal = v1
+			firstKey = k1
 			_, e := strconv.ParseInt(k1, 10, 64)
 			if e == nil {
 				isMap = true
@@ -226,11 +252,11 @@ func getType(v interface{}, name string, allowMap bool) (typ string, isMap bool,
 			break
 		}
 		if !allowMap && isMap {
-			err = errors.New("Nested map is not allowed")
+			err = errors.New("Nested map is not allowed, keypath=" + keyPath)
 			return
 		}
 		if isMap {
-			typ, _, outputObject, err = getType(firstVal, name, false)
+			typ, _, outputObject, err = getType(firstVal, name, false, keyPath+"."+firstKey)
 			if err != nil {
 				return
 			}
