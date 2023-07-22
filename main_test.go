@@ -23,6 +23,6 @@ func TestMessageFromJsonObject(t *testing.T) {
 }
 `
 	js, _ := simplejson.NewJson([]byte(data))
-	code, err := messageFromJsonObject("Hello", js.MustMap(), 0)
+	code, err := messageFromJsonObject("Hello", js.MustMap(), 0, []string{})
 	fmt.Printf("code %s, err:%v\n", strings.Join(code, "\n"), err)
 }
